@@ -1126,8 +1126,32 @@ ios_cmake_extra=(
     "-DGGML_NATIVE=OFF"
     "-DCMAKE_OSX_DEPLOYMENT_TARGET=${IOS_DEPLOYMENT_TARGET}"
 )
-echo "▶ Configure ios-device"
-run cmake --preset ios-device "${cmake_extra[@]}" "${ios_cmake_extra[@]}"
+# The ios-device and ios-simulator configures are independent (separate
+# binaryDirs, build/<preset>) and each spends ~18 min in Xcode-generator
+# try_compile probes that are latency-bound, not CPU-bound. Run the two
+# configures concurrently, then build the slices in the usual order.
+echo "▶ Configure ios-device + ios-simulator (concurrently)"
+IOS_CONFIGURE_LOG_DIR="${REPO_ROOT}/build/ios-configure-logs"
+mkdir -p "${IOS_CONFIGURE_LOG_DIR}"
+run cmake --preset ios-device "${cmake_extra[@]}" "${ios_cmake_extra[@]}" \
+    > "${IOS_CONFIGURE_LOG_DIR}/ios-device.log" 2>&1 &
+ios_device_configure_pid=$!
+run cmake --preset ios-simulator "${cmake_extra[@]}" "${ios_cmake_extra[@]}" \
+    > "${IOS_CONFIGURE_LOG_DIR}/ios-simulator.log" 2>&1 &
+ios_simulator_configure_pid=$!
+ios_device_configure_rc=0
+ios_simulator_configure_rc=0
+wait "${ios_device_configure_pid}" || ios_device_configure_rc=$?
+wait "${ios_simulator_configure_pid}" || ios_simulator_configure_rc=$?
+for ios_configure_preset in ios-device ios-simulator; do
+    echo "::group::Configure ${ios_configure_preset} (log)"
+    cat "${IOS_CONFIGURE_LOG_DIR}/${ios_configure_preset}.log"
+    echo "::endgroup::"
+done
+if [ "${ios_device_configure_rc}" -ne 0 ] || [ "${ios_simulator_configure_rc}" -ne 0 ]; then
+    echo "error: iOS configure failed (ios-device rc=${ios_device_configure_rc}, ios-simulator rc=${ios_simulator_configure_rc})" >&2
+    exit 1
+fi
 echo "▶ Build ios-device (Release)"
 ios_build_targets=(rac_commons rac_backend_llamacpp)
 if [ "${RAC_BACKEND_ONNX}" = "ON" ]; then
@@ -1147,8 +1171,6 @@ if [ "${RAC_BACKEND_MLX}" = "ON" ]; then
 fi
 run cmake --build --preset ios-device --config Release --target "${ios_build_targets[@]}" --parallel "${BUILD_JOBS}"
 
-echo "▶ Configure ios-simulator"
-run cmake --preset ios-simulator "${cmake_extra[@]}" "${ios_cmake_extra[@]}"
 echo "▶ Build ios-simulator (Release)"
 run cmake --build --preset ios-simulator --config Release --target "${ios_build_targets[@]}" --parallel "${BUILD_JOBS}"
 
